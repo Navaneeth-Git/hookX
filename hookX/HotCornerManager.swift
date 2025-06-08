@@ -44,9 +44,11 @@ class HotCornerManager: ObservableObject {
     ]
     
     @Published var isActive = false
+    @Published var accessibilityPermissionGranted = false
+    @Published var debugMousePosition: String = "No data"
     
     private var timer: Timer?
-    private let cornerTriggerDistance: CGFloat = 15  // Increased from 10 to make detection easier
+    private let cornerTriggerDistance: CGFloat = 25  // Increased from 15 to make detection even easier
     private var lastCornerTriggered: Corner?
     private var lastCornerTriggerTime = Date()
     private let triggerCooldown: TimeInterval = 1.0  // 1 second cooldown
@@ -62,6 +64,24 @@ class HotCornerManager: ObservableObject {
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
+        
+        // Check initial accessibility permission state
+        _ = checkAccessibilityPermission(prompt: false)
+        
+        print("HotCornerManager initialized - Actions loaded:")
+        for (corner, action) in cornerActions {
+            print("- \(corner.description): \(action.appName)")
+        }
+        
+        // Auto-start monitoring if we have permissions
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            self.accessibilityPermissionGranted = self.checkAccessibilityPermission(prompt: true)
+            if self.accessibilityPermissionGranted {
+                print("Auto-starting hot corner monitoring")
+                self.isActive = true
+                self.startMonitoring()
+            }
+        }
     }
     
     deinit {
@@ -75,17 +95,57 @@ class HotCornerManager: ObservableObject {
         }
     }
     
+    func checkAccessibilityPermission(prompt: Bool) -> Bool {
+        // Try both methods for requesting accessibility permissions
+        
+        // Method 1: Using AXIsProcessTrustedWithOptions
+        let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt]
+        let accessEnabled = AXIsProcessTrustedWithOptions(options)
+        
+        // Method 2: Direct check
+        if prompt && !accessEnabled {
+            // Force open the accessibility preferences
+            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+            NSWorkspace.shared.open(url)
+            
+            // Show a more visible alert to guide the user
+            let alert = NSAlert()
+            alert.messageText = "Accessibility Permission Required"
+            alert.informativeText = "Please add hookX to the accessibility permissions list:\n1. Click the + button\n2. Navigate to your Applications folder\n3. Select hookX.app\n4. Click Open"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+        
+        accessibilityPermissionGranted = accessEnabled
+        return accessEnabled
+    }
+    
     func startMonitoring() {
         guard !isActive else { return }
         
-        // Check for accessibility permissions
-        let checkOptPrompt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as NSString
-        let accessEnabled = AXIsProcessTrustedWithOptions([checkOptPrompt: true] as CFDictionary)
-        
-        if !accessEnabled {
-            print("Accessibility permissions are required for hot corners to work")
+        // Prompt for accessibility permissions if needed
+        if !checkAccessibilityPermission(prompt: true) {
+            print("No accessibility permissions - can't monitor hot corners")
+            
+            // Show an alert to guide the user
+            let alert = NSAlert()
+            alert.messageText = "Accessibility Permission Required"
+            alert.informativeText = "HookX needs accessibility permissions to detect screen corners. Please open System Settings > Privacy & Security > Accessibility and add HookX to the list of allowed apps."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: "Open Settings")
+            
+            let response = alert.runModal()
+            if response == .alertSecondButtonReturn {
+                // Open accessibility preferences
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+            }
+            
+            return
         }
         
+        print("Starting hot corner monitoring")
         isActive = true
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             self?.checkCorners()
@@ -152,19 +212,31 @@ class HotCornerManager: ObservableObject {
         let mouseLocation = NSEvent.mouseLocation
         let screens = NSScreen.screens
         
+        // Update debug info
+        debugMousePosition = "Mouse: (\(Int(mouseLocation.x)), \(Int(mouseLocation.y)))"
+        
         for screen in screens {
             let frame = screen.frame
             var detectedCorner: Corner?
             
+            // Debug log screen frame occasionally
+            if Int.random(in: 0...100) == 50 {  // Log occasionally to avoid spamming
+                print("Screen frame: \(frame), Mouse: \(mouseLocation)")
+            }
+            
             // Check if mouse is in any corner (using increased trigger distance)
             if mouseLocation.x <= frame.minX + cornerTriggerDistance && mouseLocation.y >= frame.maxY - cornerTriggerDistance {
                 detectedCorner = .topLeft
+                print("Top left corner detected")
             } else if mouseLocation.x >= frame.maxX - cornerTriggerDistance && mouseLocation.y >= frame.maxY - cornerTriggerDistance {
                 detectedCorner = .topRight
+                print("Top right corner detected")
             } else if mouseLocation.x <= frame.minX + cornerTriggerDistance && mouseLocation.y <= frame.minY + cornerTriggerDistance {
                 detectedCorner = .bottomLeft
+                print("Bottom left corner detected")
             } else if mouseLocation.x >= frame.maxX - cornerTriggerDistance && mouseLocation.y <= frame.minY + cornerTriggerDistance {
                 detectedCorner = .bottomRight
+                print("Bottom right corner detected")
             }
             
             // If corner detected and not in cooldown, trigger action
@@ -181,10 +253,13 @@ class HotCornerManager: ObservableObject {
     }
     
     private func triggerAction(for corner: Corner) {
-        guard let action = cornerActions[corner], let url = action.appURL else { return }
+        guard let action = cornerActions[corner], let url = action.appURL else {
+            print("No action configured for \(corner.description)")
+            return
+        }
         
         // Print debug information
-        print("Triggering action for \(corner.description): \(action.appName)")
+        print("TRIGGERING ACTION for \(corner.description): \(action.appName)")
         
         // Open the app
         NSWorkspace.shared.open(url)

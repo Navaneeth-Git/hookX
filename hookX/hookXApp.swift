@@ -15,7 +15,7 @@ struct hookXApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .frame(minWidth: 400, minHeight: 500)
+                .frame(minWidth: 400, minHeight: 550)
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
@@ -31,13 +31,33 @@ struct hookXApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusBarItem: NSStatusItem?
     private let hotCornerManager = HotCornerManager.shared
+    private var statusMenuItem: NSMenuItem?
+    private var statusUpdateTimer: Timer?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusBarItem()
         
         // Load saved preferences
         if UserDefaults.standard.bool(forKey: "autoStart") {
+            print("Auto-starting hot corners from preferences")
+            hotCornerManager.isActive = true  // Set this first
             hotCornerManager.startMonitoring()
+        }
+        
+        // Set up a timer to update the menu item state
+        statusUpdateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.updateStatusMenuItemState()
+        }
+    }
+    
+    func applicationWillTerminate(_ notification: Notification) {
+        // Clean up
+        statusUpdateTimer?.invalidate()
+    }
+    
+    private func updateStatusMenuItemState() {
+        DispatchQueue.main.async {
+            self.statusMenuItem?.state = self.hotCornerManager.isActive ? .on : .off
         }
     }
     
@@ -46,18 +66,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         if let button = statusBarItem?.button {
             button.image = NSImage(systemSymbolName: "rectangles.group", accessibilityDescription: "HookX")
+            
+            // Add a tooltip
+            button.toolTip = "HookX - Hot Corners"
         }
         
         let menu = NSMenu()
         
         // Toggle hot corners status
-        let statusMenuItem = NSMenuItem(
+        statusMenuItem = NSMenuItem(
             title: "Hot Corners Active",
             action: #selector(toggleHotCorners),
             keyEquivalent: "t"
         )
-        statusMenuItem.state = hotCornerManager.isActive ? .on : .off
-        menu.addItem(statusMenuItem)
+        statusMenuItem?.state = hotCornerManager.isActive ? .on : .off
+        menu.addItem(statusMenuItem!)
+        
+        // Add debug info menu item
+        let debugMenuItem = NSMenuItem(
+            title: "Debug Info",
+            action: #selector(showDebugInfo),
+            keyEquivalent: "d"
+        )
+        menu.addItem(debugMenuItem)
         
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Open HookX", action: #selector(openApp), keyEquivalent: "o"))
@@ -72,31 +103,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.windows.first?.makeKeyAndOrderFront(nil)
     }
     
+    @objc private func showDebugInfo() {
+        let alert = NSAlert()
+        alert.messageText = "HookX Debug Information"
+        
+        let debugInfo = """
+        Active: \(hotCornerManager.isActive)
+        Permission Granted: \(hotCornerManager.accessibilityPermissionGranted)
+        Mouse Position: \(hotCornerManager.debugMousePosition)
+        
+        Top Left: \(hotCornerManager.cornerActions[.topLeft]?.appName ?? "None")
+        Top Right: \(hotCornerManager.cornerActions[.topRight]?.appName ?? "None")
+        Bottom Left: \(hotCornerManager.cornerActions[.bottomLeft]?.appName ?? "None")
+        Bottom Right: \(hotCornerManager.cornerActions[.bottomRight]?.appName ?? "None")
+        
+        App Path: \(Bundle.main.bundlePath)
+        """
+        
+        alert.informativeText = debugInfo
+        alert.addButton(withTitle: "OK")
+        
+        alert.runModal()
+    }
+    
     @objc private func toggleHotCorners(_ sender: NSMenuItem) {
         let isActive = !hotCornerManager.isActive
         
         if isActive {
             // Check for accessibility permissions
-            let checkOptPrompt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as NSString
-            let accessEnabled = AXIsProcessTrustedWithOptions([checkOptPrompt: true] as CFDictionary)
+            let accessEnabled = hotCornerManager.checkAccessibilityPermission(prompt: true)
             
-            if !accessEnabled {
-                // Show alert
-                let alert = NSAlert()
-                alert.messageText = "Accessibility Permissions Required"
-                alert.informativeText = "HookX needs accessibility permissions to monitor cursor position and detect hot corners. Please enable these permissions in System Settings."
-                alert.addButton(withTitle: "Open System Settings")
-                alert.addButton(withTitle: "Cancel")
-                
-                let response = alert.runModal()
-                if response == .alertFirstButtonReturn {
-                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
-                }
-            } else {
+            if accessEnabled {
+                print("Starting hot corner monitoring from menu")
+                hotCornerManager.isActive = true
                 hotCornerManager.startMonitoring()
                 sender.state = .on
             }
         } else {
+            print("Stopping hot corner monitoring from menu")
+            hotCornerManager.isActive = false
             hotCornerManager.stopMonitoring()
             sender.state = .off
         }
@@ -107,6 +152,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct PreferencesView: View {
     @AppStorage("launchAtLogin") private var launchAtLogin = false
     @AppStorage("autoStart") private var autoStart = false
+    @ObservedObject private var hotCornerManager = HotCornerManager.shared
     
     var body: some View {
         Form {
@@ -119,11 +165,24 @@ struct PreferencesView: View {
             Toggle("Automatically start hot corners", isOn: $autoStart)
                 .onChange(of: autoStart) { newValue in
                     if newValue {
-                        HotCornerManager.shared.startMonitoring()
+                        hotCornerManager.isActive = true
+                        hotCornerManager.startMonitoring()
                     } else if !newValue {
-                        HotCornerManager.shared.stopMonitoring()
+                        hotCornerManager.isActive = false
+                        hotCornerManager.stopMonitoring()
                     }
                 }
+            
+            Divider()
+            
+            // Status section
+            VStack(alignment: .leading) {
+                Text("Status:")
+                    .bold()
+                Text("Active: \(hotCornerManager.isActive ? "Yes" : "No")")
+                Text("Accessibility: \(hotCornerManager.accessibilityPermissionGranted ? "Granted" : "Not Granted")")
+            }
+            .padding(.vertical)
             
             Divider()
             
@@ -135,3 +194,4 @@ struct PreferencesView: View {
         .frame(width: 350)
     }
 }
+

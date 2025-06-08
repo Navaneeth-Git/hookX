@@ -35,5 +35,10 @@
 	<!-- Added permissions -->
 	<key>NSAppleEventsUsageDescription</key>
 	<string>HookX needs to interact with your system to detect hot corners and launch applications.</string>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>HookX needs Accessibility permissions to detect screen corners and trigger actions.</string>
+	<!-- Additional explicit accessibility declaration -->
+	<key>NSRequiresAquaSystemAppearance</key>
+	<false/>
 </dict>
 </plist> 

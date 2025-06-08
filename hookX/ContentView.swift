@@ -15,6 +15,8 @@ struct ContentView: View {
     @State private var isShowingAppPicker = false
     @State private var selectedCorner: Corner?
     @State private var showPermissionsAlert = false
+    @State private var checkPermissionTimer: Timer?
+    @State private var showDebugInfo = false  // Toggle for debug info
     
     var body: some View {
         VStack(spacing: 20) {
@@ -25,6 +27,30 @@ struct ContentView: View {
             Text("Customize your screen corners to launch applications quickly")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
+            
+            // Permission status indicator
+            HStack {
+                Image(systemName: cornerManager.accessibilityPermissionGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundColor(cornerManager.accessibilityPermissionGranted ? .green : .orange)
+                
+                Text(cornerManager.accessibilityPermissionGranted ? "Accessibility: Granted" : "Accessibility: Not Granted")
+                    .foregroundColor(cornerManager.accessibilityPermissionGranted ? .green : .orange)
+                
+                if !cornerManager.accessibilityPermissionGranted {
+                    Button("Grant Access") {
+                        requestAccessibilityPermission()
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundColor(.blue)
+                }
+            }
+            .padding(.vertical, 5)
+            .padding(.horizontal, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(cornerManager.accessibilityPermissionGranted ? Color.green.opacity(0.1) : Color.orange.opacity(0.1))
+                    .stroke(cornerManager.accessibilityPermissionGranted ? Color.green : Color.orange, lineWidth: 0.5)
+            )
             
             // Main display area showing a rectangle with corners
             ZStack {
@@ -76,21 +102,34 @@ struct ContentView: View {
                 .toggleStyle(.switch)
                 .onChange(of: cornerManager.isActive) { newValue in
                     if newValue {
-                        // Request accessibility permissions
-                        let checkOptPrompt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as NSString
-                        let accessEnabled = AXIsProcessTrustedWithOptions([checkOptPrompt: true] as CFDictionary)
-                        
-                        if !accessEnabled {
-                            showPermissionsAlert = true
+                        if !cornerManager.accessibilityPermissionGranted {
+                            requestAccessibilityPermission()
+                        } else {
+                            cornerManager.startMonitoring()
                         }
-                        
-                        cornerManager.startMonitoring()
                     } else {
                         cornerManager.stopMonitoring()
                     }
                 }
                 .frame(maxWidth: 300)
                 .padding(.horizontal)
+            
+            // Debug information
+            if showDebugInfo {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Debug Information:")
+                        .bold()
+                    Text(cornerManager.debugMousePosition)
+                    Text("Active: \(cornerManager.isActive ? "Yes" : "No")")
+                    Text("Accessibility Granted: \(cornerManager.accessibilityPermissionGranted ? "Yes" : "No")")
+                }
+                .font(.system(size: 11))
+                .foregroundColor(.gray)
+                .padding()
+                .background(Color(.controlBackgroundColor))
+                .cornerRadius(5)
+                .padding(.horizontal)
+            }
             
             // Settings and status display
             VStack {
@@ -134,9 +173,20 @@ struct ContentView: View {
             Spacer()
             
             HStack {
+                // Debug toggle
+                Toggle("Debug", isOn: $showDebugInfo)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                
                 Spacer()
+                
                 Button("Apply") {
                     cornerManager.saveConfiguration()
+                    
+                    // Re-enable monitoring if it's supposed to be active
+                    if cornerManager.isActive {
+                        cornerManager.restartMonitoring()
+                    }
                     
                     // Show confirmation
                     if #available(macOS 11.0, *) {
@@ -156,7 +206,7 @@ struct ContentView: View {
             }
             .padding()
         }
-        .frame(width: 400, height: 500)
+        .frame(width: 400, height: 550)
         .padding()
         .sheet(isPresented: $isShowingAppPicker) {
             AppPickerView(onSelect: { url, name, icon in
@@ -169,11 +219,16 @@ struct ContentView: View {
         }
         .alert("Accessibility Permissions Required", isPresented: $showPermissionsAlert) {
             Button("Open System Settings") {
-                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+                openSystemPreferences()
+                startPermissionCheckTimer()
             }
-            Button("Cancel", role: .cancel) { }
+            Button("Cancel", role: .cancel) { 
+                if cornerManager.isActive && !cornerManager.accessibilityPermissionGranted {
+                    cornerManager.isActive = false
+                }
+            }
         } message: {
-            Text("HookX needs accessibility permissions to monitor cursor position and detect hot corners. Please enable these permissions in System Settings.")
+            Text("HookX needs accessibility permissions to monitor cursor position and detect hot corners. Please enable these permissions in System Settings.\n\n1. Click 'Open System Settings'\n2. Click the lock icon if needed\n3. Find and check the box next to 'hookX'")
         }
         .onAppear {
             // Request notification permissions
@@ -184,6 +239,54 @@ struct ContentView: View {
                     } else if let error = error {
                         print("Notification permission error: \(error.localizedDescription)")
                     }
+                }
+            }
+            
+            // Check accessibility permission
+            if !cornerManager.accessibilityPermissionGranted && cornerManager.isActive {
+                // If the app was restarted and was previously active, but permissions aren't granted
+                showPermissionsAlert = true
+            }
+            
+            // Make sure monitoring is active if it should be
+            if cornerManager.isActive && cornerManager.accessibilityPermissionGranted {
+                cornerManager.startMonitoring()
+            }
+        }
+        .onDisappear {
+            checkPermissionTimer?.invalidate()
+            checkPermissionTimer = nil
+        }
+    }
+    
+    // Function to request accessibility permissions
+    private func requestAccessibilityPermission() {
+        if !cornerManager.checkAccessibilityPermission(prompt: true) {
+            showPermissionsAlert = true
+        } else {
+            cornerManager.startMonitoring()
+        }
+    }
+    
+    // Function to open system preferences/settings
+    private func openSystemPreferences() {
+        if #available(macOS 13, *) {
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+        } else {
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Library/PreferencePanes/Security.prefPane"))
+        }
+    }
+    
+    // Start a timer to periodically check if permissions have been granted
+    private func startPermissionCheckTimer() {
+        checkPermissionTimer?.invalidate()
+        checkPermissionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            let hasPermission = cornerManager.checkAccessibilityPermission(prompt: false)
+            if hasPermission {
+                checkPermissionTimer?.invalidate()
+                checkPermissionTimer = nil
+                if cornerManager.isActive {
+                    cornerManager.startMonitoring()
                 }
             }
         }
